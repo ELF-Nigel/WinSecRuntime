@@ -124,6 +124,11 @@ enum class Alert : uint64_t {
     , module_list_hash_mismatch      = 1ull << 56
     , module_count_mismatch          = 1ull << 57
     , module_whitelist_violation     = 1ull << 58
+    , import_module_count_mismatch   = 1ull << 59
+    , import_func_count_mismatch     = 1ull << 60
+    , vm_low_cpu_cores               = 1ull << 61
+    , vm_low_ram                     = 1ull << 62
+    , driver_blacklist_detected      = 1ull << 63
 };
 
 inline constexpr Alert operator|(Alert a, Alert b) {
@@ -823,16 +828,36 @@ inline bool cpuid_vm_vendor_blacklisted(const uint32_t* hashes, size_t count) {
     }
     return false;
 }
+
+inline bool low_cpu_cores(uint32_t min_cores) {
+    if (min_cores == 0) return false;
+    SYSTEM_INFO si{};
+    ::GetSystemInfo(&si);
+    return si.dwNumberOfProcessors < min_cores;
+}
+
+inline bool low_ram_gb(uint32_t min_gb) {
+    if (min_gb == 0) return false;
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (!::GlobalMemoryStatusEx(&ms)) return false;
+    uint64_t total_gb = ms.ullTotalPhys / (1024ull * 1024ull * 1024ull);
+    return total_gb < min_gb;
+}
 #else
 inline bool cpuid_hypervisor_bit() { return false; }
 inline bool cpuid_vm_vendor_blacklisted(const uint32_t*, size_t) { return false; }
+inline bool low_cpu_cores(uint32_t) { return false; }
+inline bool low_ram_gb(uint32_t) { return false; }
 #endif
 
-inline Report run(const uint32_t* vendor_hashes = nullptr, size_t vendor_count = 0) {
+inline Report run(const uint32_t* vendor_hashes = nullptr, size_t vendor_count = 0, uint32_t min_cores = 0, uint32_t min_ram_gb = 0) {
     Report r;
 #if SECURE_ENABLE_VM_CHECK
     if (cpuid_hypervisor_bit()) r.set(Alert::vm_detected);
     if (cpuid_vm_vendor_blacklisted(vendor_hashes, vendor_count)) r.set(Alert::vm_vendor_blacklisted);
+    if (low_cpu_cores(min_cores)) r.set(Alert::vm_low_cpu_cores);
+    if (low_ram_gb(min_ram_gb)) r.set(Alert::vm_low_ram);
 #endif
     return r;
 }
@@ -1093,6 +1118,41 @@ inline uint32_t import_module_hash() {
         }
     }
     return h;
+}
+
+inline size_t import_module_count() {
+    HMODULE hMod = ::GetModuleHandleW(nullptr);
+    if (!hMod) return 0;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return 0;
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    size_t count = 0;
+    for (; desc->Name; ++desc) ++count;
+    return count;
+}
+
+inline size_t import_func_count() {
+    HMODULE hMod = ::GetModuleHandleW(nullptr);
+    if (!hMod) return 0;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return 0;
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    size_t count = 0;
+    for (; desc->Name; ++desc) {
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
+        for (; thunk->u1.Function; ++thunk) ++count;
+    }
+    return count;
 }
 
 inline bool delay_import_directory_valid() {
@@ -1470,6 +1530,8 @@ inline bool tls_directory_valid() { return true; }
 inline bool reloc_directory_valid() { return true; }
 inline bool import_directory_valid() { return true; }
 inline uint32_t import_module_hash() { return 0; }
+inline size_t import_module_count() { return 0; }
+inline size_t import_func_count() { return 0; }
 inline bool delay_import_directory_valid() { return true; }
 inline uint32_t delay_import_name_hash() { return 0; }
 inline bool signature_present() { return true; }
@@ -1863,6 +1925,24 @@ inline bool module_whitelist_valid(const uint32_t* hashes, size_t count) {
     return ok;
 }
 
+inline bool driver_blacklist_detected(const uint32_t* hashes, size_t count) {
+    if (!hashes || count == 0) return false;
+    void* drivers[1024] = {0};
+    DWORD needed = 0;
+    if (!::EnumDeviceDrivers(drivers, sizeof(drivers), &needed)) return false;
+    size_t n = needed / sizeof(void*);
+    wchar_t path[MAX_PATH] = {0};
+    for (size_t i = 0; i < n; ++i) {
+        if (::GetDeviceDriverFileNameW(drivers[i], path, MAX_PATH)) {
+            uint32_t h = util::fnv1a32_ci_w(path);
+            for (size_t j = 0; j < count; ++j) {
+                if (hashes[j] == h) return true;
+            }
+        }
+    }
+    return false;
+}
+
 inline bool module_blacklist_detected(const uint32_t* hashes, size_t count) {
     if (!hashes || count == 0) return false;
     HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, ::GetCurrentProcessId());
@@ -1890,6 +1970,7 @@ inline bool module_blacklist_detected(const uint32_t*, size_t) { return false; }
 inline uint32_t module_list_hash() { return 0; }
 inline size_t module_count() { return 0; }
 inline bool module_whitelist_valid(const uint32_t*, size_t) { return true; }
+inline bool driver_blacklist_detected(const uint32_t*, size_t) { return false; }
 #endif
 
 inline Report run(const uint32_t* hashes, size_t count) {
@@ -2052,15 +2133,21 @@ struct Config {
     size_t module_whitelist_count = 0;
     uint32_t module_list_hash_baseline = 0;
     size_t module_count_baseline = 0;
+    const uint32_t* driver_blacklist_hashes = nullptr;
+    size_t driver_blacklist_count = 0;
     const uint32_t* process_hashes = nullptr;
     size_t process_hash_count = 0;
     const uint32_t* window_hashes = nullptr;
     size_t window_hash_count = 0;
     const uint32_t* vm_vendor_hashes = nullptr;
     size_t vm_vendor_hash_count = 0;
+    uint32_t vm_min_cores = 0;
+    uint32_t vm_min_ram_gb = 0;
     uint32_t iat_baseline = 0;
     uint32_t import_name_hash_baseline = 0;
     uint32_t import_module_hash_baseline = 0;
+    size_t import_module_count_baseline = 0;
+    size_t import_func_count_baseline = 0;
     bool iat_write_protect = false;
     bool iat_writable_check = false;
     size_t iat_count_baseline = 0;
@@ -2096,7 +2183,7 @@ inline Report run_all_checks(const Config& cfg = {}) {
     Report s = anti_debug::run_static(cfg.window_hashes, cfg.window_hash_count,
                                       cfg.process_hashes, cfg.process_hash_count);
     Report d = anti_debug::run_dynamic();
-    Report v = vm::run(cfg.vm_vendor_hashes, cfg.vm_vendor_hash_count);
+    Report v = vm::run(cfg.vm_vendor_hashes, cfg.vm_vendor_hash_count, cfg.vm_min_cores, cfg.vm_min_ram_gb);
     Report t = anti_tamper::run();
     Report i = iat_guard::run();
     Report h = anti_hook::run(cfg.prologue_guards, cfg.prologue_guard_count);
@@ -2114,6 +2201,14 @@ inline Report run_all_checks(const Config& cfg = {}) {
     if (cfg.import_module_hash_baseline != 0) {
         uint32_t h = anti_tamper::import_module_hash();
         if (h != cfg.import_module_hash_baseline) r.set(Alert::import_module_hash_mismatch);
+    }
+    if (cfg.import_module_count_baseline != 0) {
+        size_t c = anti_tamper::import_module_count();
+        if (c != cfg.import_module_count_baseline) r.set(Alert::import_module_count_mismatch);
+    }
+    if (cfg.import_func_count_baseline != 0) {
+        size_t c = anti_tamper::import_func_count();
+        if (c != cfg.import_func_count_baseline) r.set(Alert::import_func_count_mismatch);
     }
     if (cfg.iat_count_baseline != 0) {
         size_t c = iat_guard::iat_entry_count(::GetModuleHandleW(nullptr));
@@ -2187,6 +2282,11 @@ inline Report run_all_checks(const Config& cfg = {}) {
     if (cfg.module_whitelist_hashes && cfg.module_whitelist_count > 0) {
         if (!anti_injection::module_whitelist_valid(cfg.module_whitelist_hashes, cfg.module_whitelist_count)) {
             r.set(Alert::module_whitelist_violation);
+        }
+    }
+    if (cfg.driver_blacklist_hashes && cfg.driver_blacklist_count > 0) {
+        if (anti_injection::driver_blacklist_detected(cfg.driver_blacklist_hashes, cfg.driver_blacklist_count)) {
+            r.set(Alert::driver_blacklist_detected);
         }
     }
     return r;

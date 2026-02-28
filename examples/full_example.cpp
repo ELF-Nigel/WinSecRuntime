@@ -23,6 +23,12 @@ int main() {
     policy.cfg.module_hash_count = sizeof(module_hashes) / sizeof(module_hashes[0]);
     policy.cfg.module_list_hash_baseline = secure::anti_injection::module_list_hash();
     policy.cfg.module_count_baseline = secure::anti_injection::module_count();
+    static constexpr uint32_t driver_hashes[] = {
+        secure::util::fnv1a32_ci_literal("vboxdrv.sys"),
+        secure::util::fnv1a32_ci_literal("vmhgfs.sys")
+    };
+    policy.cfg.driver_blacklist_hashes = driver_hashes;
+    policy.cfg.driver_blacklist_count = sizeof(driver_hashes) / sizeof(driver_hashes[0]);
 
     static constexpr uint32_t process_hashes[] = {
         secure::util::fnv1a32_ci_literal("x64dbg.exe"),
@@ -54,6 +60,8 @@ int main() {
     };
     policy.cfg.vm_vendor_hashes = vm_vendor_hashes;
     policy.cfg.vm_vendor_hash_count = sizeof(vm_vendor_hashes) / sizeof(vm_vendor_hashes[0]);
+    policy.cfg.vm_min_cores = 2;
+    policy.cfg.vm_min_ram_gb = 4;
 
     policy.cfg.iat_baseline = secure::iat_guard::iat_hash(::GetModuleHandleW(nullptr));
     policy.cfg.iat_bounds_check = true;
@@ -62,6 +70,8 @@ int main() {
     policy.cfg.import_name_hash_baseline = secure::iat_guard::import_name_hash(::GetModuleHandleW(nullptr));
     policy.cfg.import_module_hash_baseline = secure::anti_tamper::import_module_hash();
     policy.cfg.iat_count_baseline = secure::iat_guard::iat_entry_count(::GetModuleHandleW(nullptr));
+    policy.cfg.import_module_count_baseline = secure::anti_tamper::import_module_count();
+    policy.cfg.import_func_count_baseline = secure::anti_tamper::import_func_count();
 
     size_t iat_count = secure::iat_guard::iat_entry_count(::GetModuleHandleW(nullptr));
     std::vector<void*> iat_mirror(iat_count);

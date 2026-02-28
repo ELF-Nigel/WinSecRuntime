@@ -99,7 +99,7 @@ WinSecRuntime::EnableHookGuard();
 
 ## Configuration Reference
 
-All configuration lives in `secure::runtime::Config`. You can build a `WinSecRuntime::Policy` and pass it to `WinSecRuntime::RunAll` or `Heartbeat`.
+All configuration lives in `secure::runtime::Config`.
 
 ```cpp
 secure::runtime::Config cfg{};
@@ -120,6 +120,9 @@ cfg.module_whitelist_count = 0;
 cfg.module_list_hash_baseline = 0;
 cfg.module_count_baseline = 0;
 
+cfg.driver_blacklist_hashes = nullptr;
+cfg.driver_blacklist_count = 0;
+
 cfg.process_hashes = nullptr;
 cfg.process_hash_count = 0;
 
@@ -128,10 +131,15 @@ cfg.window_hash_count = 0;
 
 cfg.vm_vendor_hashes = nullptr;
 cfg.vm_vendor_hash_count = 0;
+cfg.vm_min_cores = 0;
+cfg.vm_min_ram_gb = 0;
 
 cfg.iat_baseline = 0;
 cfg.import_name_hash_baseline = 0;
 cfg.import_module_hash_baseline = 0;
+cfg.import_module_count_baseline = 0;
+cfg.import_func_count_baseline = 0;
+
 cfg.iat_write_protect = false;
 cfg.iat_writable_check = false;
 cfg.iat_count_baseline = 0;
@@ -176,7 +184,6 @@ cfg.prologue_guard_count = 0;
 
 ### Anti‑Debug
 
-Signals used:
 - `IsDebuggerPresent`, `CheckRemoteDebuggerPresent`
 - PEB `BeingDebugged` and `NtGlobalFlag`
 - Debug object and debug port (optional undocumented)
@@ -205,6 +212,8 @@ Signals used:
 - Export RVA table hash baseline
 - Import module hash baseline
 - Import name hash baseline (IAT)
+- Import module count baseline
+- Import function count baseline
 
 ### Anti‑Hook
 
@@ -221,6 +230,7 @@ Signals used:
 - Module list hash baseline
 - Module count baseline
 - Module whitelist validation
+- Driver blacklist detection (user‑mode)
 - Thread start address anomaly detection
 - RWX section detection
 - Writable `.text` detection
@@ -237,6 +247,8 @@ Signals used:
 
 - CPUID hypervisor bit
 - CPUID vendor string blacklist
+- Low CPU core count detection
+- Low RAM detection
 
 ### TLS Callback Protection
 
@@ -254,8 +266,6 @@ Signals used:
 
 ### String Obfuscation (Compile‑Time)
 
-Compile‑time XOR for strings and wide strings with runtime decrypt and zeroization.
-
 ```cpp
 auto obf = SECURE_OBF("WinSecRuntime");
 auto plain = obf.decrypt();
@@ -270,27 +280,15 @@ secure::util::secure_zero(plainw.data(), plainw.size() * sizeof(wchar_t));
 
 Full example with baselines and advanced configuration is at `examples/full_example.cpp`.
 
-Minimal example:
-
-```cpp
-#include "WinSecRuntime/WinSecRuntime.h"
-int main(){
-  WinSecRuntime::Policy p{};
-  p.cfg.iat_baseline = secure::iat_guard::iat_hash(::GetModuleHandleW(nullptr));
-  return WinSecRuntime::RunAll(p).ok()?0:1;
-}
-```
-
 ## Hardening Flags
 
-Recommended MSVC flags:
 - `/GS /guard:cf`
 - `/DYNAMICBASE /HIGHENTROPYVA`
 - `LTCG` enabled
 
 ## Notes and Limits
 
-- This library is defensive only and avoids deception or evasive techniques.
+- Defensive only. No deception or evasive techniques.
 - Some checks use undocumented APIs when `SECURE_ENABLE_UNDOCUMENTED` is enabled.
 - Baseline hashes should be computed at startup and reused for periodic validation.
 
