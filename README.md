@@ -106,6 +106,12 @@ secure::runtime::Config cfg{};
 
 cfg.expected_parent_pid = 0;
 cfg.expected_image_path = L"...";
+cfg.require_same_session = false;
+cfg.expected_integrity_rid = 0;
+cfg.cmdline_hash_baseline = 0;
+cfg.cwd_hash_baseline = 0;
+cfg.disallow_unc = false;
+cfg.disallow_motw = false;
 
 cfg.parent_chain_hashes = nullptr;
 cfg.parent_chain_hash_count = 0;
@@ -194,6 +200,16 @@ cfg.prologue_guard_count = 0;
 ```
 
 ## Feature Reference
+
+### Parent / Ancestry Validation (Defensive)
+
+- Parent PID check
+- Same session ID check
+- Integrity level RID check
+- Command-line hash baseline
+- Current directory hash baseline
+- UNC execution detection
+- Mark‑of‑the‑Web (Zone.Identifier) detection
 
 ### Anti‑Debug
 

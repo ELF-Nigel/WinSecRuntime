@@ -12,6 +12,7 @@
 #include <chrono>
 #include <vector>
 #include <algorithm>
+#include <string>
 #include <type_traits>
 #include <cmath>
 #include <limits>
@@ -52,6 +53,7 @@
 #include <tlhelp32.h>
 #include <winternl.h>
 #include <psapi.h>
+#include <wincrypt.h>
 #if defined(__GNUC__) && !defined(_MSC_VER)
 #include <cpuid.h>
 #endif
@@ -139,7 +141,13 @@ enum class Alert2 : uint64_t {
     export_blacklist_detected        = 1ull << 4,
     image_region_unlinked            = 1ull << 5,
     exec_private_threshold           = 1ull << 6,
-    nop_sled_detected                = 1ull << 7
+    nop_sled_detected                = 1ull << 7,
+    parent_session_mismatch          = 1ull << 8,
+    integrity_level_mismatch         = 1ull << 9,
+    cmdline_hash_mismatch            = 1ull << 10,
+    cwd_hash_mismatch                = 1ull << 11,
+    unc_execution_detected           = 1ull << 12,
+    motw_detected                    = 1ull << 13
 };
 
 inline constexpr Alert operator|(Alert a, Alert b) {
@@ -1999,11 +2007,68 @@ inline bool image_path_valid(const wchar_t* expected_path) {
     if (n == 0) return false;
     return _wcsicmp(buf, expected_path) == 0;
 }
+
+inline bool same_session_as_parent() {
+    DWORD self = 0, parent = 0;
+    if (!::ProcessIdToSessionId(::GetCurrentProcessId(), &self)) return false;
+    uint32_t ppid = parent_pid();
+    if (ppid == 0) return false;
+    if (!::ProcessIdToSessionId(ppid, &parent)) return false;
+    return self == parent;
+}
+
+inline DWORD integrity_level_rid() {
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) return 0;
+    DWORD len = 0;
+    ::GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &len);
+    if (len == 0) { ::CloseHandle(token); return 0; }
+    std::vector<uint8_t> buf(len);
+    if (!::GetTokenInformation(token, TokenIntegrityLevel, buf.data(), len, &len)) {
+        ::CloseHandle(token);
+        return 0;
+    }
+    auto* til = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buf.data());
+    DWORD rid = *GetSidSubAuthority(til->Label.Sid, *GetSidSubAuthorityCount(til->Label.Sid) - 1);
+    ::CloseHandle(token);
+    return rid;
+}
+
+inline uint32_t cmdline_hash() {
+    const wchar_t* cmd = ::GetCommandLineW();
+    if (!cmd) return 0;
+    return util::fnv1a32_ci_w(cmd);
+}
+
+inline uint32_t cwd_hash() {
+    wchar_t buf[MAX_PATH] = {0};
+    DWORD n = ::GetCurrentDirectoryW(MAX_PATH, buf);
+    if (n == 0) return 0;
+    return util::fnv1a32_ci_w(buf);
+}
+
+inline bool is_unc_path(const wchar_t* path) {
+    if (!path) return false;
+    return (path[0] == L'\\\\' && path[1] == L'\\\\');
+}
+
+inline bool has_motw(const wchar_t* path) {
+    if (!path) return false;
+    std::wstring ads = std::wstring(path) + L\":Zone.Identifier\";
+    DWORD attrs = ::GetFileAttributesW(ads.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES;
+}
 #else
 inline uint32_t parent_pid() { return 0; }
 inline bool parent_chain_valid(const uint32_t*, size_t, size_t = 4) { return true; }
 inline bool parent_pid_valid(uint32_t) { return true; }
 inline bool image_path_valid(const wchar_t*) { return true; }
+inline bool same_session_as_parent() { return true; }
+inline DWORD integrity_level_rid() { return 0; }
+inline uint32_t cmdline_hash() { return 0; }
+inline uint32_t cwd_hash() { return 0; }
+inline bool is_unc_path(const wchar_t*) { return false; }
+inline bool has_motw(const wchar_t*) { return false; }
 #endif
 
 inline Report run(uint32_t expected_parent_pid, const wchar_t* expected_image_path) {
@@ -2318,6 +2383,12 @@ namespace runtime {
 struct Config {
     uint32_t expected_parent_pid = 0;
     const wchar_t* expected_image_path = nullptr;
+    bool require_same_session = false;
+    DWORD expected_integrity_rid = 0;
+    uint32_t cmdline_hash_baseline = 0;
+    uint32_t cwd_hash_baseline = 0;
+    bool disallow_unc = false;
+    bool disallow_motw = false;
     const uint32_t* parent_chain_hashes = nullptr;
     size_t parent_chain_hash_count = 0;
     size_t parent_chain_max_depth = 4;
@@ -2495,6 +2566,30 @@ inline Report run_all_checks(const Config& cfg = {}) {
         if (!process_integrity::parent_chain_valid(cfg.parent_chain_hashes, cfg.parent_chain_hash_count,
                                                    cfg.parent_chain_max_depth)) {
             r.set(Alert::parent_chain_mismatch);
+        }
+    }
+    if (cfg.require_same_session) {
+        if (!process_integrity::same_session_as_parent()) r.set2(Alert2::parent_session_mismatch);
+    }
+    if (cfg.expected_integrity_rid != 0) {
+        if (process_integrity::integrity_level_rid() != cfg.expected_integrity_rid) r.set2(Alert2::integrity_level_mismatch);
+    }
+    if (cfg.cmdline_hash_baseline != 0) {
+        if (process_integrity::cmdline_hash() != cfg.cmdline_hash_baseline) r.set2(Alert2::cmdline_hash_mismatch);
+    }
+    if (cfg.cwd_hash_baseline != 0) {
+        if (process_integrity::cwd_hash() != cfg.cwd_hash_baseline) r.set2(Alert2::cwd_hash_mismatch);
+    }
+    if (cfg.disallow_unc) {
+        wchar_t path[MAX_PATH] = {0};
+        if (::GetModuleFileNameW(nullptr, path, MAX_PATH) && process_integrity::is_unc_path(path)) {
+            r.set2(Alert2::unc_execution_detected);
+        }
+    }
+    if (cfg.disallow_motw) {
+        wchar_t path[MAX_PATH] = {0};
+        if (::GetModuleFileNameW(nullptr, path, MAX_PATH) && process_integrity::has_motw(path)) {
+            r.set2(Alert2::motw_detected);
         }
     }
     if (cfg.module_list_hash_baseline != 0) {

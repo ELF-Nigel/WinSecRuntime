@@ -13,6 +13,12 @@ int main() {
 
     policy.cfg.expected_parent_pid = 0;
     policy.cfg.expected_image_path = nullptr;
+    policy.cfg.require_same_session = true;
+    policy.cfg.expected_integrity_rid = SECURITY_MANDATORY_MEDIUM_RID;
+    policy.cfg.cmdline_hash_baseline = secure::process_integrity::cmdline_hash();
+    policy.cfg.cwd_hash_baseline = secure::process_integrity::cwd_hash();
+    policy.cfg.disallow_unc = true;
+    policy.cfg.disallow_motw = true;
 
     static constexpr uint32_t module_hashes[] = {
         secure::util::fnv1a32_ci_literal("x64dbg.dll"),
