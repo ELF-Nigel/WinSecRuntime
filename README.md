@@ -211,6 +211,21 @@ cfg.prologue_guard_count = 0;
 - UNC execution detection
 - Mark‑of‑the‑Web (Zone.Identifier) detection
 
+Example configuration:
+
+```cpp
+WinSecRuntime::Policy p{};
+
+p.cfg.require_same_session = true;
+p.cfg.expected_integrity_rid = SECURITY_MANDATORY_MEDIUM_RID;
+
+p.cfg.cmdline_hash_baseline = secure::process_integrity::cmdline_hash();
+p.cfg.cwd_hash_baseline = secure::process_integrity::cwd_hash();
+
+p.cfg.disallow_unc = true;
+p.cfg.disallow_motw = true;
+```
+
 ### Anti‑Debug
 
 - `IsDebuggerPresent`, `CheckRemoteDebuggerPresent`
