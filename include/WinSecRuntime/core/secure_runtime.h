@@ -2049,12 +2049,12 @@ inline uint32_t cwd_hash() {
 
 inline bool is_unc_path(const wchar_t* path) {
     if (!path) return false;
-    return (path[0] == L'\\\\' && path[1] == L'\\\\');
+    return (path[0] == L'\\' && path[1] == L'\\');
 }
 
 inline bool has_motw(const wchar_t* path) {
     if (!path) return false;
-    std::wstring ads = std::wstring(path) + L\":Zone.Identifier\";
+    std::wstring ads = std::wstring(path) + L":Zone.Identifier";
     DWORD attrs = ::GetFileAttributesW(ads.c_str());
     return attrs != INVALID_FILE_ATTRIBUTES;
 }
