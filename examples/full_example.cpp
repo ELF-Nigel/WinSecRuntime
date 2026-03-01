@@ -84,6 +84,8 @@ int main() {
     policy.cfg.iat_bounds_check = true;
     policy.cfg.iat_write_protect = true;
     policy.cfg.iat_writable_check = true;
+    policy.cfg.iat_require_executable = true;
+    policy.cfg.iat_disallow_self = true;
     policy.cfg.import_name_hash_baseline = secure::iat_guard::import_name_hash(::GetModuleHandleW(nullptr));
     policy.cfg.import_module_hash_baseline = secure::anti_tamper::import_module_hash();
     policy.cfg.iat_count_baseline = secure::iat_guard::iat_entry_count(::GetModuleHandleW(nullptr));
@@ -112,6 +114,7 @@ int main() {
     policy.cfg.text_chunk_baseline = secure::anti_tamper::text_chunk_hash_current(
         policy.cfg.text_chunk_seed, policy.cfg.text_chunk_size, policy.cfg.text_chunk_count);
     policy.cfg.nop_sled_threshold = 24;
+    policy.cfg.int3_sled_threshold = 8;
 
     policy.cfg.delay_import_name_hash_baseline = secure::anti_tamper::delay_import_name_hash();
     policy.cfg.export_name_hash_baseline = secure::anti_tamper::export_name_hash();
@@ -141,6 +144,7 @@ int main() {
     };
     policy.cfg.prologue_guards = guards;
     policy.cfg.prologue_guard_count = sizeof(guards) / sizeof(guards[0]);
+    policy.cfg.prologue_jmp_forbidden = true;
 
     WinSecRuntime::Initialize(WinSecRuntime::Mode::Moderate, policy.cfg);
 

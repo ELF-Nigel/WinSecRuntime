@@ -152,7 +152,13 @@ enum class Alert2 : uint64_t {
     image_path_allowlist_violation   = 1ull << 15,
     safe_dll_search_disabled         = 1ull << 16,
     known_dll_missing                = 1ull << 17,
-    module_path_policy_violation     = 1ull << 18
+    module_path_policy_violation     = 1ull << 18,
+    pe_header_sanity_invalid         = 1ull << 19,
+    import_name_strings_invalid      = 1ull << 20,
+    iat_target_non_exec              = 1ull << 21,
+    iat_target_self                  = 1ull << 22,
+    inline_jmp_detected              = 1ull << 23,
+    int3_sled_detected               = 1ull << 24
 };
 
 inline constexpr Alert operator|(Alert a, Alert b) {
@@ -1231,6 +1237,45 @@ inline bool import_directory_valid() {
     return true;
 }
 
+inline bool import_name_strings_valid() {
+    HMODULE hMod = ::GetModuleHandleW(nullptr);
+    if (!hMod) return false;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return true;
+    size_t image_size = nt->OptionalHeader.SizeOfImage;
+    if (!image_range_contains(base, image_size, dir.VirtualAddress, dir.Size)) return false;
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    for (; desc->Name; ++desc) {
+        if (desc->Name >= image_size) return false;
+        const char* mod = reinterpret_cast<const char*>(base + desc->Name);
+        const char* end = reinterpret_cast<const char*>(base + image_size);
+        for (const char* p = mod; p < end; ++p) {
+            if (*p == '\0') break;
+            if (p + 1 >= end) return false;
+        }
+        auto thunk_rva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk;
+        if (!thunk_rva || thunk_rva >= image_size) return false;
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + thunk_rva);
+        for (; thunk->u1.AddressOfData; ++thunk) {
+            if (IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal)) continue;
+            if (thunk->u1.AddressOfData >= image_size) return false;
+            auto* name = reinterpret_cast<IMAGE_IMPORT_BY_NAME*>(base + thunk->u1.AddressOfData);
+            const char* s = reinterpret_cast<const char*>(name->Name);
+            const char* end2 = reinterpret_cast<const char*>(base + image_size);
+            for (const char* p = s; p < end2; ++p) {
+                if (*p == '\0') break;
+                if (p + 1 >= end2) return false;
+            }
+        }
+    }
+    return true;
+}
+
 inline uint32_t import_module_hash() {
     HMODULE hMod = ::GetModuleHandleW(nullptr);
     if (!hMod) return 0;
@@ -1565,6 +1610,33 @@ inline bool nop_sled_detected(size_t threshold) {
     return false;
 }
 
+inline bool int3_sled_detected(size_t threshold) {
+    if (threshold == 0) return false;
+    HMODULE hMod = ::GetModuleHandleW(nullptr);
+    if (!hMod) return false;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (std::memcmp(sec[i].Name, ".text", 5) == 0) {
+            uint8_t* text = base + sec[i].VirtualAddress;
+            size_t size = sec[i].Misc.VirtualSize;
+            size_t run = 0;
+            for (size_t j = 0; j < size; ++j) {
+                if (text[j] == 0xCC) {
+                    if (++run >= threshold) return true;
+                } else {
+                    run = 0;
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
 inline uint32_t text_chunk_hash_current(uint32_t seed, uint32_t chunk_size, uint32_t chunk_count) {
     if (seed == 0 || chunk_size == 0 || chunk_count == 0) return 0;
     HMODULE hMod = ::GetModuleHandleW(nullptr);
@@ -1623,6 +1695,39 @@ inline bool pe_header_valid() {
 #else
     if (nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) return false;
 #endif
+    return true;
+}
+
+inline bool pe_header_sanity_valid() {
+    HMODULE hMod = ::GetModuleHandleW(nullptr);
+    if (!hMod) return false;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    if (dos->e_lfanew < sizeof(IMAGE_DOS_HEADER)) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const auto& fh = nt->FileHeader;
+    const auto& oh = nt->OptionalHeader;
+    if (fh.NumberOfSections == 0 || fh.NumberOfSections > 96) return false;
+    if (oh.SizeOfImage < oh.SizeOfHeaders) return false;
+    auto is_pow2 = [](uint32_t v) { return v && ((v & (v - 1)) == 0); };
+    if (!is_pow2(oh.FileAlignment) || oh.FileAlignment < 0x200) return false;
+    if (!is_pow2(oh.SectionAlignment) || oh.SectionAlignment < oh.FileAlignment) return false;
+    if (oh.SizeOfHeaders < sizeof(IMAGE_DOS_HEADER)) return false;
+    const auto* sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < fh.NumberOfSections; ++i) {
+        uint32_t vsz = sec[i].Misc.VirtualSize;
+        uint32_t va = sec[i].VirtualAddress;
+        if (va + vsz < va) return false;
+        if (va + vsz > oh.SizeOfImage) return false;
+    }
+    for (size_t i = 0; i < IMAGE_NUMBEROF_DIRECTORY_ENTRIES; ++i) {
+        const auto& d = oh.DataDirectory[i];
+        if (d.VirtualAddress == 0 || d.Size == 0) continue;
+        if (d.VirtualAddress + d.Size < d.VirtualAddress) return false;
+        if (d.VirtualAddress + d.Size > oh.SizeOfImage) return false;
+    }
     return true;
 }
 
@@ -1689,6 +1794,7 @@ inline bool export_rva_valid() { return true; }
 inline bool tls_directory_valid() { return true; }
 inline bool reloc_directory_valid() { return true; }
 inline bool import_directory_valid() { return true; }
+inline bool import_name_strings_valid() { return true; }
 inline uint32_t import_module_hash() { return 0; }
 inline size_t import_module_count() { return 0; }
 inline size_t import_func_count() { return 0; }
@@ -1717,7 +1823,9 @@ inline bool entry_point_valid() { return true; }
 inline bool section_bounds_valid() { return true; }
 inline uint32_t text_chunk_hash_current(uint32_t, uint32_t, uint32_t) { return 0; }
 inline bool nop_sled_detected(size_t) { return false; }
+inline bool int3_sled_detected(size_t) { return false; }
 inline bool pe_header_valid() { return true; }
+inline bool pe_header_sanity_valid() { return true; }
 inline bool rwx_section_detected() { return false; }
 inline bool exec_private_region() { return false; }
 inline bool text_writable() { return false; }
@@ -1731,10 +1839,12 @@ inline Report run() {
     if (!tls_directory_valid()) r.set(Alert::tls_directory_invalid);
     if (!reloc_directory_valid()) r.set(Alert::reloc_directory_invalid);
     if (!import_directory_valid()) r.set(Alert::import_directory_invalid);
+    if (!import_name_strings_valid()) r.set2(Alert2::import_name_strings_invalid);
     if (!entry_point_protect_valid()) r.set(Alert::entry_point_protect_invalid);
     if (!entry_point_valid()) r.set(Alert::entry_point_invalid);
     if (!section_bounds_valid()) r.set(Alert::section_bounds_invalid);
     if (!pe_header_valid()) r.set(Alert::pe_header_invalid);
+    if (!pe_header_sanity_valid()) r.set2(Alert2::pe_header_sanity_invalid);
     if (rwx_section_detected()) r.set(Alert::rwx_section_detected);
     if (exec_private_region()) r.set(Alert::exec_private_region);
     if (text_writable()) r.set(Alert::text_writable);
@@ -1855,6 +1965,52 @@ inline bool iat_pointer_bounds_valid(HMODULE hMod) {
     return true;
 }
 
+inline bool iat_targets_executable(HMODULE hMod) {
+    if (!hMod) return false;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return true;
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    for (; desc->Name; ++desc) {
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
+        for (; thunk->u1.Function; ++thunk) {
+            void* fn = reinterpret_cast<void*>(static_cast<uintptr_t>(thunk->u1.Function));
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (::VirtualQuery(fn, &mbi, sizeof(mbi)) == 0) return false;
+            DWORD p = mbi.Protect & 0xFF;
+            if (!(p == PAGE_EXECUTE || p == PAGE_EXECUTE_READ || p == PAGE_EXECUTE_READWRITE || p == PAGE_EXECUTE_WRITECOPY)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+inline bool iat_targets_not_in_self(HMODULE hMod) {
+    if (!hMod) return false;
+    auto* base = reinterpret_cast<uint8_t*>(hMod);
+    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    size_t image_size = nt->OptionalHeader.SizeOfImage;
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || !dir.Size) return true;
+    auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+    for (; desc->Name; ++desc) {
+        auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
+        for (; thunk->u1.Function; ++thunk) {
+            auto fn = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(thunk->u1.Function));
+            if (fn >= base && fn < base + image_size) return false;
+        }
+    }
+    return true;
+}
+
 inline bool iat_writable(HMODULE hMod) {
     if (!hMod) return false;
     auto* base = reinterpret_cast<uint8_t*>(hMod);
@@ -1923,6 +2079,8 @@ inline size_t iat_entry_count(void*) { return 0; }
 inline bool iat_fill_mirror(void*, void**, size_t) { return false; }
 inline bool iat_mirror_mismatch(void*, void**, size_t) { return false; }
 inline bool iat_pointer_bounds_valid(void*) { return true; }
+inline bool iat_targets_executable(void*) { return true; }
+inline bool iat_targets_not_in_self(void*) { return true; }
 inline bool iat_writable(void*) { return false; }
 inline bool iat_enforce_readonly(void*) { return true; }
 inline uint32_t import_name_hash(void*) { return 0; }
@@ -2356,6 +2514,18 @@ inline bool prologue_mismatch(const PrologueGuard* items, size_t count) {
     return false;
 }
 
+inline bool prologue_jmp_detected(const PrologueGuard* items, size_t count) {
+    if (!items || count == 0) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (!items[i].address) continue;
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(items[i].address);
+        if (items[i].size < 2) continue;
+        if (p[0] == 0xE9 || p[0] == 0xE8 || p[0] == 0xEB) return true;
+        if (p[0] == 0xFF && (p[1] == 0x25 || p[1] == 0x15)) return true;
+    }
+    return false;
+}
+
 inline Report run(const PrologueGuard* items, size_t count) {
     Report r;
     if (prologue_mismatch(items, count)) r.set(Alert::inline_hook_detected);
@@ -2520,6 +2690,8 @@ struct Config {
     void** iat_mirror = nullptr;
     size_t iat_mirror_count = 0;
     bool iat_bounds_check = false;
+    bool iat_require_executable = false;
+    bool iat_disallow_self = false;
     std::array<uint8_t, 32> text_sha256_baseline{};
     uint32_t text_rolling_crc_baseline = 0;
     uint32_t text_rolling_crc_window = 64;
@@ -2531,6 +2703,7 @@ struct Config {
     uint32_t text_chunk_count = 32;
     uint32_t text_chunk_baseline = 0;
     size_t nop_sled_threshold = 0;
+    size_t int3_sled_threshold = 0;
     uint32_t delay_import_name_hash_baseline = 0;
     uint32_t export_name_hash_baseline = 0;
     uint32_t export_rva_hash_baseline = 0;
@@ -2550,6 +2723,7 @@ struct Config {
     size_t exec_private_whitelist_count = 0;
     const anti_hook::PrologueGuard* prologue_guards = nullptr;
     size_t prologue_guard_count = 0;
+    bool prologue_jmp_forbidden = false;
 };
 
 inline Report run_all_checks(const Config& cfg = {}) {
@@ -2602,6 +2776,12 @@ inline Report run_all_checks(const Config& cfg = {}) {
     if (cfg.iat_bounds_check) {
         if (!iat_guard::iat_pointer_bounds_valid(::GetModuleHandleW(nullptr))) r.set(Alert::iat_bounds_invalid);
     }
+    if (cfg.iat_require_executable) {
+        if (!iat_guard::iat_targets_executable(::GetModuleHandleW(nullptr))) r.set2(Alert2::iat_target_non_exec);
+    }
+    if (cfg.iat_disallow_self) {
+        if (!iat_guard::iat_targets_not_in_self(::GetModuleHandleW(nullptr))) r.set2(Alert2::iat_target_self);
+    }
 #endif
     if (anti_tamper::text_sha256_mismatch(cfg.text_sha256_baseline)) r.set(Alert::text_sha256_mismatch);
     if (anti_tamper::text_rolling_crc_mismatch(cfg.text_rolling_crc_baseline,
@@ -2614,6 +2794,9 @@ inline Report run_all_checks(const Config& cfg = {}) {
     }
     if (cfg.nop_sled_threshold > 0) {
         if (anti_tamper::nop_sled_detected(cfg.nop_sled_threshold)) r.set2(Alert2::nop_sled_detected);
+    }
+    if (cfg.int3_sled_threshold > 0) {
+        if (anti_tamper::int3_sled_detected(cfg.int3_sled_threshold)) r.set2(Alert2::int3_sled_detected);
     }
     if (cfg.delay_import_name_hash_baseline != 0) {
         uint32_t dh = anti_tamper::delay_import_name_hash();
@@ -2659,6 +2842,11 @@ inline Report run_all_checks(const Config& cfg = {}) {
     if (cfg.entry_prologue_baseline != 0) {
         if (anti_tamper::entry_prologue_mismatch(cfg.entry_prologue_baseline, cfg.entry_prologue_size)) {
             r.set(Alert::entry_prologue_mismatch);
+        }
+    }
+    if (cfg.prologue_jmp_forbidden) {
+        if (anti_hook::prologue_jmp_detected(cfg.prologue_guards, cfg.prologue_guard_count)) {
+            r.set2(Alert2::inline_jmp_detected);
         }
     }
     if (cfg.signature_required && !anti_tamper::signature_present()) r.set(Alert::signature_missing);
