@@ -1,3 +1,7 @@
+#ifndef WINSECRUNTIME_EXPORTS
+#define WINSECRUNTIME_EXPORTS 1
+#endif
+
 #include "WinSecRuntime/WinSecRuntime.h"
 
 namespace WinSecRuntime {
