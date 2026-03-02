@@ -11,7 +11,7 @@
 #    ifdef WINSECRUNTIME_EXPORTS
 #      define WINSECRUNTIME_API __declspec(dllexport)
 #    else
-#      define WINSECRUNTIME_API __declspec(dllimport)
+#      define WINSECRUNTIME_API
 #    endif
 #  else
 #    define WINSECRUNTIME_API
