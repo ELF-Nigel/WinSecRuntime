@@ -3,7 +3,7 @@
 Windows runtime security library for C++20 (MSVC/Clang). Supports header-only usage and a library build layout for static `.lib` or protected `.dll` builds. This project focuses on **defensive** runtime integrity, anti-debug, anti-hook, and injection detection without deception.
 
 Contact:
-- Discord: chefendpoint
+- Discord: pb2j
 - Telegram: ELF_Nigel
 
 ## Table of Contents
