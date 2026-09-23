@@ -645,6 +645,7 @@ inline bool trap_flag_set() {
 #endif
 }
 
+// will fix for RT changes
 inline bool thread_suspended_detected() {
 #if SECURE_ENABLE_UNDOCUMENTED
     using NtQueryInformationThread_t = NTSTATUS (NTAPI*)(HANDLE, THREADINFOCLASS, PVOID, ULONG, PULONG);
