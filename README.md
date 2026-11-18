@@ -375,6 +375,20 @@ secure::util::secure_zero(plainw.data(), plainw.size() * sizeof(wchar_t));
 
 Full example with baselines and advanced configuration is at `examples/full_example.cpp`.
 
+the example reports both alert fields and exits successfully when checks complete.
+alerts depend on the host and policy; pass `--strict` to return 1 when alerts are present.
+invalid arguments return 2. no checks are disabled in report mode.
+
+```powershell
+.\build\Release\WinSecRuntimeExample.exe
+.\build\Release\WinSecRuntimeExample.exe --strict
+ctest --test-dir build -C Release --output-on-failure
+```
+
+heartbeat destruction stops and joins the worker. callbacks must not destroy their
+own heartbeat. configuration pointers must remain valid until destruction finishes.
+build fresh binaries with cmake; files in `Build/` are older snapshots.
+
 ## Hardening Flags
 
 - `/GS /guard:cf`

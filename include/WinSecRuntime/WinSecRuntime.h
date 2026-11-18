@@ -7,11 +7,11 @@
 #endif
 
 #if defined(_WIN32) && !WINSECRUNTIME_HEADER_ONLY
-#  ifdef WINSECRUNTIME_BUILD_SHARED
+#  if defined(WINSECRUNTIME_BUILD_SHARED) && WINSECRUNTIME_BUILD_SHARED
 #    ifdef WINSECRUNTIME_EXPORTS
 #      define WINSECRUNTIME_API __declspec(dllexport)
 #    else
-#      define WINSECRUNTIME_API
+#      define WINSECRUNTIME_API __declspec(dllimport)
 #    endif
 #  else
 #    define WINSECRUNTIME_API

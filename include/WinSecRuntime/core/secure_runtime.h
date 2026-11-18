@@ -16,6 +16,7 @@
 #include <type_traits>
 #include <cmath>
 #include <limits>
+#include <system_error>
 
 // feature toggles
 #ifndef SECURE_ENABLE_ANTI_DEBUG
@@ -2939,11 +2940,28 @@ public:
         : interval(interval_ms), cbk(cb), config(cfg) {
         running.store(true, std::memory_order_release);
 #if SECURE_PLATFORM_WINDOWS
-        ::CreateThread(nullptr, 0, &Heartbeat::thread_proc, this, 0, nullptr);
+        stop_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!stop_event) {
+            throw std::system_error(::GetLastError(), std::system_category());
+        }
+        worker = ::CreateThread(nullptr, 0, &Heartbeat::thread_proc, this, 0, nullptr);
+        if (!worker) {
+            const DWORD error = ::GetLastError();
+            ::CloseHandle(stop_event);
+            throw std::system_error(error, std::system_category());
+        }
 #endif
     }
 
-    ~Heartbeat() { running.store(false, std::memory_order_release); }
+    ~Heartbeat() {
+        running.store(false, std::memory_order_release);
+#if SECURE_PLATFORM_WINDOWS
+        ::SetEvent(stop_event);
+        ::WaitForSingleObject(worker, INFINITE);
+        ::CloseHandle(worker);
+        ::CloseHandle(stop_event);
+#endif
+    }
 
 private:
     uint32_t interval;
@@ -2952,12 +2970,15 @@ private:
     std::atomic<bool> running{false};
 
 #if SECURE_PLATFORM_WINDOWS
+    HANDLE stop_event = nullptr;
+    HANDLE worker = nullptr;
+
     static DWORD WINAPI thread_proc(LPVOID p) {
         auto* self = reinterpret_cast<Heartbeat*>(p);
         while (self->running.load(std::memory_order_acquire)) {
             Report r = run_all_checks(self->config);
             if (self->cbk) self->cbk(r);
-            ::Sleep(self->interval);
+            if (::WaitForSingleObject(self->stop_event, self->interval) != WAIT_TIMEOUT) break;
         }
         return 0;
     }

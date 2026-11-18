@@ -4,11 +4,18 @@
 
 static void on_alert(secure::Report r) {
     if (!r.ok()) {
-        std::printf("Security alert flags: 0x%llx\n", static_cast<unsigned long long>(r.flags));
+        std::printf("security alert flags: 0x%llx, flags2: 0x%llx\n",
+            static_cast<unsigned long long>(r.flags),
+            static_cast<unsigned long long>(r.flags2));
     }
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const bool strict = argc == 2 && std::strcmp(argv[1], "--strict") == 0;
+    if (argc > 1 && !strict) {
+        std::printf("usage: WinSecRuntimeExample [--strict]\n");
+        return 2;
+    }
     WinSecRuntime::Policy policy{};
 
     policy.cfg.expected_parent_pid = 0;
@@ -146,14 +153,14 @@ int main() {
     policy.cfg.prologue_guard_count = sizeof(guards) / sizeof(guards[0]);
     policy.cfg.prologue_jmp_forbidden = true;
 
-    WinSecRuntime::Initialize(WinSecRuntime::Mode::Moderate, policy.cfg);
+    if (!WinSecRuntime::Initialize(WinSecRuntime::Mode::Moderate, policy.cfg)) {
+        return 1;
+    }
 
     secure::runtime::Heartbeat hb(5000, &on_alert, policy.cfg);
 
     secure::Report r = WinSecRuntime::RunAll(policy);
-    if (!r.ok()) {
-        return 1;
-    }
-
-    return 0;
+    on_alert(r);
+    std::printf("runtime checks completed\n");
+    return strict && !r.ok() ? 1 : 0;
 }

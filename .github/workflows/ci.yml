@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
@@ -45,3 +45,6 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: test
+        run: ctest --test-dir build -C Release --output-on-failure
